@@ -1,0 +1,5 @@
+path: C:/Users/volcano/WorkBuddy/2026-10-17-19-27-06/h-player/_test/yolo_pipeline/dataset2
+train: train/images
+val: val/images
+names:
+  0: ball
