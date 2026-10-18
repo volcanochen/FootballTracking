@@ -26,6 +26,20 @@ _verify/
 # ---- 评测中间产物 ----
 dets_*/
 anno_*.json
+# 导播逐帧遥测：auto_director.py / auto_two_shot.py 可重新生成
+telemetry_*.json
+# 人工目检抽帧图
+review_sheet*.jpg
+# RF-DETR 推理输出（帧图 + 视频 + 评测 json）
+rf_out/
+rf_out40/
+# 人物检测缓存：person_dets.py 可重建
+dets_person_cache_*.npy
+
+# ---- 一次性调试/探测脚本与备份（不入库）----
+_*.py
+_*.json
+*.bak
 
 # ---- Python ----
 __pycache__/

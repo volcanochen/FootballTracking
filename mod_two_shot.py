@@ -1,0 +1,200 @@
+# -*- coding: utf-8 -*-
+"""【模块 5】两档镜头（近 / 远）：owner 在远半场 → 平缓推近；回到近半场 → 还原原始比例
+
+只保留两种镜头：
+  FAR  —— 带球人在画面远半场（脚点 y < 半场线）。此时**只取源画面左上角附近的
+           0.75×0.75 区域，等比放大填满全屏**（等效 1/0.75 = 1.3333 倍）。
+           因为 0.75×0.75 与输出宽高比相同，放大到全屏严格不变形；
+  NEAR —— 带球人在近半场，回到 S_NEAR = 1.0，即**原始比例，一点都不放大**。
+
+窗口位置两种模式（ANCHOR）：
+  "owner" —— 窗口中心平滑跟随带球人（默认）。必须如此：实测远半场 owner 的脚点 y
+             在 0.28~0.50，而严格钉死左上角的 0.75 高窗口只覆盖 y<0.267，
+             会把带球人整个漏在窗外，放大出来是一片草皮；
+  "tl"    —— 严格钉在左上角（cx=cy=0.375）。只用于对照实验。
+
+为什么用"脚点 y"当远近判据（而不是 x）：
+  实测 4 段 owner 的 corr(脚点y, 人像高) = 0.96~0.99，而 corr(x, 人像高) 只有
+  0.66/0.89/0.49/-0.46 —— 这是标准侧视全景机位，画面越靠下离摄像机越近，
+  x 只代表沿边线方向的位置，与距离无关。用 x 判远近会把"左侧近处"误判成远处。
+
+三段式设计：
+  ① 标定 calibrate()：从本段数据自适应出"半场线 y_split"（全场人脚点中位数）；
+  ② 档位决策：迟滞带 BAND + 最短驻留 DWELL，杜绝在半场线附近反复横跳；
+  ③ 推拉：定时长 smoothstep 缓动（C1 连续、无过冲、时长可控），比弹簧更适合
+     "只有两档"这种离散目标 —— 弹簧会留下指数尾巴，观感上不像摄影师，
+     更像没停稳。摇镜则用一阶低通 + 限速跟随 owner。
+
+输出 view dict 与 mod_camera 同构，可复用 crop() / to_out() / eval。
+
+自测: python mod_two_shot.py
+"""
+import numpy as np
+
+# ---- 远档：只取源画面 0.75×0.75，放大填满全屏 ----
+FAR_WIN = 0.75           # 远档裁剪窗占源画面的比例（宽高都是 0.75 倍）
+S_NEAR = 1.0             # 近档：原始比例（严格 1.0，不裁剪不放大）
+S_FAR = 1.0 / FAR_WIN    # = 1.3333；窗与输出同宽高比 → 放大到全屏严格不变形
+ANCHOR = "owner"         # 窗口位置："owner" 跟随带球人 / "tl" 钉死左上角
+
+# ---- 档位决策 ----
+BAND = 0.025             # 半场线迟滞带（归一化 y）：带内不切换
+DWELL = 20               # 最短驻留帧数（0.67s）：再快就是抽搐不是运镜
+RAMP_SEC = 1.4           # 推拉时长：1.0↔1.333 走 1.4 秒，慢到看不出机械感
+
+# ---- 摇镜跟随 ----
+TAU_PAN = 0.25           # 一阶低通时间常数（秒）
+VMAX_PAN = 0.50          # 最大摇镜速度（画面宽/秒）
+
+
+def calibrate(all_foot_ys):
+    """从本段数据自适应标定半场线 → y_split
+
+    全场所有人脚点 y 的中位数 ≈ 场地"中线"在画面里的位置（人近似均布）。
+    远档倍率是固定的 1/0.75，不需要也不应该自适应 —— 用户要的就是"四分之三"。
+    """
+    return float(np.median(all_foot_ys)) if all_foot_ys else 0.42
+
+
+class TwoShotDirector:
+    """每帧喂 owner 框，吐裁剪窗。只有 FAR / NEAR 两档。"""
+
+    def __init__(self, y_split, fps=29.97, src_w=854, src_h=356,
+                 out_w=854, out_h=356):
+        self.y_split = float(y_split)
+        self.fps = fps
+        self.dt = 1.0 / fps
+        self.src_w, self.src_h = src_w, src_h
+        self.out_w, self.out_h = out_w, out_h
+        self.s_far = S_FAR
+        self.cx, self.cy = FAR_WIN / 2, FAR_WIN / 2
+        self.s = S_NEAR
+        self.shot, self.shot_enter = "NEAR", 0
+        self.ramp_f0, self.ramp_s0, self.ramp_s1 = 0, S_NEAR, S_NEAR
+        self._f = 0
+        # 推拉速率上限 = smoothstep 导数峰值 1.5 × 总行程 / 时长
+        self.vmax_zoom = 1.5 * abs(S_FAR - S_NEAR) / RAMP_SEC
+        self.ramp_frames = max(1, int(RAMP_SEC * fps))
+
+    def _set_shot(self, want, f):
+        # 推拉没走完不许改主意：摄影师一旦按下推拉键就推到底，中途反悔会变成抽搐，
+        # 而且会让"档位"和"人实际在哪个半场"对不上（实测 seg2 语义一致率只有 0.91）。
+        if want == self.shot or f - self.shot_enter < DWELL:
+            return
+        if f - self.ramp_f0 < self.ramp_frames and self.ramp_s1 != self.ramp_s0:
+            return
+        self.shot, self.shot_enter = want, f
+        # 从"当前倍率"重新起坡：跨越式改主意也不会跳变
+        self.ramp_f0, self.ramp_s0 = f, self.s
+        self.ramp_s1 = S_FAR if want == "FAR" else S_NEAR
+
+    def step(self, own_box, ball_pos=None):
+        """own_box: 归一化 (x0,y0,x1,y1)；无 owner 时保持当前档位与画面。"""
+        f = self._f
+        self._f = f + 1
+
+        # --- ① 档位决策（迟滞 + 驻留）---
+        if own_box is None:
+            want = self.shot                      # owner 丢失：绝不改档
+        else:
+            y = float(own_box[3])                 # 脚点 y：小 = 远，大 = 近
+            if y < self.y_split - BAND:
+                want = "FAR"
+            elif y > self.y_split + BAND:
+                want = "NEAR"
+            else:
+                want = self.shot                  # 迟滞带内：保持不变
+        self._set_shot(want, f)
+
+        # --- ② 推拉：定时长 smoothstep ---
+        u = (f - self.ramp_f0) / float(self.ramp_frames)
+        u = 0.0 if u < 0 else (1.0 if u > 1 else u)
+        u = u * u * (3.0 - 2.0 * u)               # C1 连续，首尾速度为 0
+        s_new = self.ramp_s0 + (self.ramp_s1 - self.ramp_s0) * u
+        zoom_v = abs(s_new - self.s) / self.dt
+        self.s = float(s_new)
+
+        # --- ③ 摇镜：一阶低通 + 限速跟随 owner ---
+        if ANCHOR == "tl":
+            tc = np.array([FAR_WIN / 2, FAR_WIN / 2])     # 钉死左上角（对照用）
+        elif own_box is not None:
+            tc = np.array([(own_box[0] + own_box[2]) / 2.0,
+                           (own_box[1] + own_box[3]) / 2.0])
+        elif ball_pos is not None:
+            tc = np.array(ball_pos)               # 没 owner 时至少跟球
+        else:
+            tc = np.array([self.cx, self.cy])     # 什么都没有：原地不动
+        a = 1.0 - float(np.exp(-self.dt / TAU_PAN))
+        d = (tc - np.array([self.cx, self.cy])) * a
+        m = float(np.linalg.norm(d))
+        lim = VMAX_PAN * self.dt
+        if m > lim:
+            d = d * (lim / m)
+            m = lim
+        self.cx = self.cx + float(d[0])
+        self.cy = self.cy + float(d[1])
+
+        self.pan_v = m / self.dt
+        self.zoom_v = zoom_v
+        return self._view()
+
+    def _view(self):
+        """裁剪窗由输出宽高比反推，sx ≡ sy（画面绝不压扁/拉高）"""
+        cw = self.src_w / self.s
+        ch = cw * self.out_h / self.out_w
+        if cw >= self.src_w or ch >= self.src_h:
+            cw, ch = float(self.src_w), float(self.src_h)
+        cx_px = float(np.clip(self.cx * self.src_w, cw / 2, self.src_w - cw / 2))
+        cy_px = float(np.clip(self.cy * self.src_h, ch / 2, self.src_h - ch / 2))
+        self.cx, self.cy = cx_px / self.src_w, cy_px / self.src_h   # 回写防漂移
+        sx, sy = self.out_w / cw, self.out_h / ch
+        if abs(sx - sy) > 1e-6:
+            raise SystemExit("aspect unlocked: sx=%.6f sy=%.6f" % (sx, sy))
+        ox, oy = cx_px - cw / 2, cy_px - ch / 2
+        return {"state": self.shot, "s": self.s, "sx": sx, "sy": sy,
+                "cw": cw, "ch": ch, "ox": ox, "oy": oy,
+                "ow": int(self.out_w), "oh": int(self.out_h),
+                "x0": ox / self.src_w, "y0": oy / self.src_h,
+                "pan_v": round(float(getattr(self, "pan_v", 0.0)), 5),
+                "zoom_v": round(float(getattr(self, "zoom_v", 0.0)), 5),
+                "vmax_pan": VMAX_PAN, "vmax_zoom": self.vmax_zoom,
+                "reframing": False, "y_split": self.y_split, "s_far": self.s_far,
+                "anchor": ANCHOR, "far_win": FAR_WIN}
+
+
+if __name__ == "__main__":
+    # 自测 1：owner 从远端(0.30)走到近端(0.50)再走回去
+    y_split = calibrate([0.30 + 0.002 * i for i in range(60)])
+    d = TwoShotDirector(y_split)
+    bad, shots, zooms, tl = 0, [], [], 0
+    for i in range(400):
+        y = 0.50 - 0.20 * (i / 200.0) if i < 200 else 0.30 + 0.20 * ((i - 200) / 200.0)
+        v = d.step((0.45, y - 0.14, 0.55, y))
+        if abs(v["sx"] - v["sy"]) > 1e-6:
+            bad += 1
+        if not (0.0 <= v["x0"] and v["x0"] + v["cw"] / 854 <= 1.0 + 1e-6 and
+                0.0 <= v["y0"] and v["y0"] + v["ch"] / 356 <= 1.0 + 1e-6):
+            bad += 1
+        if v["state"] == "FAR" and abs(v["s"] - S_FAR) < 0.002:
+            tl += 1
+            # 远档稳态时，裁剪窗必须是源画面的 0.75×0.75。
+            # 容差按 cw = 1/s 换算：dcw = ds/s²（s=1.333 时 ds=0.002 → dcw≈0.0011），
+            # 直接用 1e-6 会把 smoothstep 的收敛尾巴误判成违规。
+            if abs(v["cw"] / 854 - FAR_WIN) > 0.0015 or abs(v["ch"] / 356 - FAR_WIN) > 0.0015:
+                bad += 1
+        shots.append(v["state"])
+        zooms.append(v["s"])
+    sw = sum(1 for i in range(1, len(shots)) if shots[i] != shots[i - 1])
+    print("自测A 400 帧：违规=%d  档位切换=%d 次  zoom=%.2f~%.2f  远档稳态=%d 帧" % (
+        bad, sw, min(zooms), max(zooms), tl))
+    print("       远档裁剪窗 = %.3f×%.3f 个源画面 → 放大 %.4fx 填满全屏（等比）" % (
+        FAR_WIN, FAR_WIN, S_FAR))
+
+    # 自测 2：钉死左上角模式
+    import mod_two_shot as m
+    m.ANCHOR = "tl"
+    d2 = m.TwoShotDirector(y_split)
+    cx = [d2.step((0.45, 0.30, 0.55, 0.46))["x0"] for _ in range(60)]
+    print("自测B tl 模式：窗口左边界=%.4f（应为 0.0000）上边界=%.4f" % (
+        min(cx), m.TwoShotDirector(y_split).step((0.45, 0.30, 0.55, 0.46))["y0"]))
+    m.ANCHOR = "owner"

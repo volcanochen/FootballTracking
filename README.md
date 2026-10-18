@@ -212,6 +212,29 @@ eval_ft.py → dets_ft → viterbi → 对比验证 ← 不达标回到种子步
 - [ ] 生成 tracks.json 推真机（N6）做端到端跟焦验证
 - [ ] 若召回不足：扩大种子、多场视频增广
 
+**人物检测跟踪（下一阶段，方案已出）：**
+- 详见 [`docs/PLAN_PERSON_SERVER.md`](docs/PLAN_PERSON_SERVER.md)（方案 A · 服务器预计算）、
+  [`docs/PLAN_PERSON_DEVICE.md`](docs/PLAN_PERSON_DEVICE.md)（方案 B · 设备端实时）、
+  [`docs/EVAL_PERSON.md`](docs/EVAL_PERSON.md)（共用评测协议：帧级 85%/5s）
+- 已实测：yolo26n 裸模型在本域 imgsz=640 漏检 ~35% 的人，imgsz=1280 召回正常但会误检广告牌海报人物
+  （目检图 `../probe_person_s*.jpg`，仓库外）
+
+**自动导播（球 + 人 + owner + 虚拟运镜，四/五模块已解耦）：**
+- 模块划分：`mod_ball.py`（球轨迹，吃 `ball_best.py` 每帧 5 次推理融合的候选）
+  → `mod_person.py`（人检测 + ByteTrack 风格关联：恒速外推 + IoU + 球衣 HSV ReID + 匈牙利分配）
+  → `mod_owner.py`（带球人：脚点距离 + 迟滞 + 换人门槛 + 8 帧时序投票）
+  → `mod_camera.py`（连续变焦导演）/ `mod_two_shot.py`（**两档镜头**）
+- 编排与判定：`auto_director.py` / `auto_two_shot.py` 出视频 + 逐帧遥测；
+  `eval_director.py` / `eval_two_shot.py` 做 AI 判定（比例锁定 / 球无闪走 / owner 覆盖与抖动 /
+  镜头跟球 / 变焦平滑 / 换档方向正确等 12~13 项）
+- 两档镜头语义（`mod_two_shot.py`）：owner 在远半场 → 只取源画面 **0.75×0.75** 的区域、
+  **等比放大填满全屏**（1/0.75 = 1.3333 倍，严格不变形）；回到近半场 → 还原 s=1.0 原始比例。
+  窗口大小固定，位置默认跟随带球人（`ANCHOR="owner"`；`"tl"` 为钉死左上角的对照模式）。
+- **关键实测**：`corr(脚点y, 人像高) = 0.96~0.99`，而 `corr(x, 人像高) = 0.66/0.89/0.49/-0.46`
+  —— 侧视全景机位下"远近"必须用脚点 y 判，用 x 会把左侧近处误判成远处。
+- 宽高比教训（用户反馈"不能压扁拉高"）：裁剪窗尺寸必须由**输出宽高比反推**并断言 `sx ≡ sy`，
+  且输出尺寸显式取整，否则 `int(sx*cw)` 偶发 853×355 会令 ffmpeg 丢帧约 10%。
+
 **已知限制：**
 - 标注只有 8 个测试段（~2 分钟有效画面），换场地/光照需重新走标注闭环
 - pose 朝向先验无效（俯拍机位），代码保留但 Viterbi 中贡献为 0
@@ -246,6 +269,19 @@ VIT=1 node tracks.js segs_cur.json    # 待接入 BALL_SRC=vit 分支
 
 # 推送到真机（N6）
 adb push tracks.json /sdcard/Android/data/com.vcncfootball/files/tracks/BV1fRae6LEmJ.json
+
+# ── 自动导播（模块化）──
+PY=.../python.exe
+$PY ball_best.py 2,3,6,10            # 球：每帧 5 次推理融合的最佳候选 → cand_best_*.json
+$PY person_dets.py 2,3,6,10          # 人：批量生成检测缓存 dets_person_cache_*.npy
+
+# 连续变焦导演（WIDE/BALL/FOLLOW/ACTION 状态机 + 弹簧手感）
+$PY auto_director.py 2,3,6,10         # → auto_director_s*.mp4 + telemetry_s*.json
+$PY eval_director.py 2,3,6,10         # AI 判定 12 项
+
+# 两档镜头（远=0.75×0.75 放大到全屏 / 近=原始比例）
+$PY auto_two_shot.py 2,3,6,10         # → two_shot_s*.mp4 + telemetry_two_s*.json
+$PY eval_two_shot.py 2,3,6,10         # AI 判定 13 项
 ```
 
 ## 9. 相关分支与产物
