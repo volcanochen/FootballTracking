@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "balltracer"
+version = "1.0.0"
+description = "足球(白球)检测与轨迹预计算引擎：SAHI 切片检测 + MPEG 式 I/P 帧分区推理 + 物理速度门限时序跟踪"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["ultralytics", "opencv-python", "torch"]
+
+[project.scripts]
+balltracer = "balltracer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["balltracer*"]

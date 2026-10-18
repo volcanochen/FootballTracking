@@ -1,0 +1,42 @@
+# ---- 大型媒体与权重（项目规则：视频与权重不外传）----
+full.mp4
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.pt
+*.ptt
+*.onnx
+runs/
+weights/
+
+# ---- 训练数据集（大型、可由脚本重建；按需另行入库）----
+dataset2/
+dataset3/
+
+# ---- 派生缓存与日志（可由管线重生成）----
+cand_*.json
+tracks.json
+*.log
+frame_*.png
+check_*.png
+ref_*.mp4
+_verify/
+
+# ---- 评测中间产物 ----
+dets_*/
+anno_*.json
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.cache
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
