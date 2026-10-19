@@ -22,6 +22,7 @@ sys.path.insert(0, HERE)
 
 from mod_ball import track_ball, smooth_for_control    # noqa: E402
 from mod_camera import Director, crop                  # noqa: E402
+from vidout import H264Writer                            # noqa: E402
 from mod_owner import compute_owner                    # noqa: E402
 from mod_person import load_persons                    # noqa: E402
 
@@ -76,8 +77,9 @@ def run(seg_id):
     d = Director(shot, FPS, SRC_W, SRC_H, OUT_W, OUT_H)
     rng = np.random.default_rng(11)
     palette = {p["id"]: tuple(int(v) for v in rng.integers(60, 240, 3)) for p in persons}
-    vw = cv2.VideoWriter(os.path.join(HERE, "auto_director_s%d.mp4" % seg_id),
-                         cv2.VideoWriter_fourcc(*"mp4v"), FPS, (OUT_W, OUT_H))
+    # H.264/yuv420p/faststart 写出，close() 内含容器自检（禁用 mp4v）
+    vw = H264Writer(os.path.join(HERE, "auto_director_s%d.mp4" % seg_id),
+                    OUT_W, OUT_H, FPS)
     tele, trail, zoom_log, owner_px = [], [], [], []
 
     def to_out(p, view):
@@ -159,7 +161,10 @@ def run(seg_id):
                      "ball_kind": (None if bp is None else ball_kind[f][0]),
                      "owner": own})
 
-    vw.release()
+    vinfo = vw.close()
+    print("视频自检 %s: %s %s %s faststart=%s" % (
+        os.path.basename(vw.path), vinfo["codec"], vinfo["pix_fmt"],
+        vinfo["fourcc"], vinfo["faststart"]), flush=True)
     json.dump({"seg": seg_id, "note": note, "n": n, "fps": FPS,
                "ball_src": bst["src"], "shot_threshold": shot, "frames": tele,
                "summary": {"ball_det": bst["det"], "ball_interp": bst["interp"],

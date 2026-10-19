@@ -25,6 +25,7 @@ from mod_owner import compute_owner                      # noqa: E402
 from mod_person import load_persons                      # noqa: E402
 from mod_two_shot import (FAR_WIN, S_FAR, TwoShotDirector,  # noqa: E402
                           calibrate, RAMP_SEC)
+from vidout import H264Writer                            # noqa: E402  （H.264 写出 + 自检）
 
 VIDEO = os.path.join(HERE, "full.mp4")
 FPS = 29.97
@@ -91,8 +92,10 @@ def run(seg_id):
     d = TwoShotDirector(y_split, FPS, SRC_W, SRC_H, OUT_W, OUT_H)
     rng = np.random.default_rng(11)
     palette = {p["id"]: tuple(int(v) for v in rng.integers(60, 240, 3)) for p in persons}
-    vw = cv2.VideoWriter(os.path.join(HERE, "two_shot_s%d.mp4" % seg_id),
-                         cv2.VideoWriter_fourcc(*"mp4v"), FPS, (OUT_W, OUT_H))
+    # H.264/yuv420p/faststart 写出；close() 内部会解析 MP4 容器自检，不合格直接抛异常
+    # （绝不用 cv2.VideoWriter + mp4v —— 那是 MPEG-4 Part 2，浏览器/飞书/网盘播不了）
+    vw = H264Writer(os.path.join(HERE, "two_shot_s%d.mp4" % seg_id),
+                    OUT_W, OUT_H, FPS)
     tele, trail, owner_px = [], [], []
 
     def to_out(p, view):
@@ -178,10 +181,14 @@ def run(seg_id):
                      "ball": (None if bp is None else [round(bp[0], 5), round(bp[1], 5)]),
                      "ball_kind": (None if bp is None else ball_kind[f][0]),
                      "owner": own,
+                     "settled": view["settled"], "anchor": view["anchor"],
                      "owner_box": (None if own_box is None else
                                    [round(float(v), 5) for v in own_box])})
 
-    vw.release()
+    vinfo = vw.close()          # 内含 H.264/yuv420p/faststart 自检
+    print("视频自检 %s: %s %s %s faststart=%s" % (
+        os.path.basename(vw.path), vinfo["codec"], vinfo["pix_fmt"],
+        vinfo["fourcc"], vinfo["faststart"]), flush=True)
     json.dump({"seg": seg_id, "note": note, "n": n, "fps": FPS,
                "y_split": y_split, "s_far": S_FAR, "far_win": FAR_WIN,
                "anchor": view["anchor"] if False else __import__("mod_two_shot").ANCHOR,

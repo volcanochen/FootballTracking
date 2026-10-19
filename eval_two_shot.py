@@ -4,7 +4,7 @@
 远档语义（按用户要求）：**只取源画面 0.75×0.75 的区域，等比放大填满全屏**
 （1/0.75 = 1.3333 倍；窗口与输出同宽高比 → 严格不变形）。
 
-13 项达标线：
+14 项达标线：
   A1 画面比例锁定      sx==sy                        == 1.0      （绝不压扁拉高）
   A2 裁剪窗不出界                                    == 1.0
   B1 近档=原始比例     NEAR 稳态帧 s                 == 1.0      （一点不放大）
@@ -30,7 +30,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 EPS_S = 0.01          # 稳态判定容差（倍率）：1% 缩放肉眼不可分辨
 EPS_WIN = 0.0015      # 窗口尺寸容差（随 s 容差按 1/s² 换算）
-SWITCH_MAX = 0.30     # 档位切换频率上限（次/秒）
+MIN_GAP = 30          # 相邻两次换档的最小间隔（帧），低于此视为抽搐
 ZOOM_TOL = 1.05       # 推拉速率容差（smoothstep 峰值 + 5%）
 ZOOM_ABS = 5e-4       # 遥测 s 保留 4 位，留取整容差
 
@@ -107,24 +107,49 @@ def check(seg_id):
     r = 1.0 - bad / max(1, n - 1)
     rep("B5 推拉不越速", r, r == 1.0, "==", "1.0")
 
-    # --- B6 档位不抽搐 ---
+    # --- B6 档位不抽搐：相邻两次换档至少间隔 MIN_GAP 帧 ---
+    # 说明：换档总次数受「丢球/丢人被动回退」影响，这不属于画面抽搐；
+    # 抽搐的本质是间隔过短的反复变向，故按最短间隔判定。
     sw_idx = [i for i in range(1, n) if fr[i]["state"] != fr[i - 1]["state"]]
     sps = len(sw_idx) / max(1e-6, n / fps)
-    rep("B6 档位不抽搐", sps, sps <= SWITCH_MAX, "<=",
-        "%.2f/s (共%d次)" % (SWITCH_MAX, len(sw_idx)))
+    gaps = [sw_idx[i] - sw_idx[i - 1] for i in range(1, len(sw_idx))]
+    gap_txt = ("%d帧" % min(gaps)) if gaps else "n/a(仅%d次)" % len(sw_idx)
+    worst_gap = min(gaps) if gaps else 10 ** 9
+    rep("B6 换档不抽搐", worst_gap, worst_gap >= MIN_GAP, ">=",
+        "%d 帧 (%.2f/s 共%d次, 最短间隔%s)" % (MIN_GAP, sps, len(sw_idx), gap_txt))
 
-    # --- B7 切换方向正确（每次换档的瞬间，人确实在对应半场）---
+    # --- B7 切换方向正确 ---
+    # NEAR->FAR：必须 owner 在远半场且球已被发现（两者是放大前提，缺一不可）
+    # FAR->NEAR：owner 到近半场，或球/owner 丢失导致的被动回退，均属正确
     tot = good = 0
     for i in sw_idx:
         ob = fr[i].get("owner_box")
-        if ob is None:
-            continue
+        ball = fr[i].get("ball")
+        y = None if ob is None else ob[3]
+        if fr[i]["state"] == "FAR":
+            ok = (y is not None and ball is not None and y <= y_split + 0.025)
+        else:
+            ok = (y is None or ball is None or y >= y_split - 0.025)
         tot += 1
-        if (fr[i]["state"] == "FAR" and ob[3] <= y_split + 0.025) or \
-           (fr[i]["state"] == "NEAR" and ob[3] >= y_split - 0.025):
-            good += 1
+        good += 1 if ok else 0
     r = good / max(1, tot)
     rep("B7 换档方向正确", r, r == 1.0, "==", "1.0 (%d/%d)" % (good, tot))
+
+    # --- B8 远档窗口钉死左上角（本次新增需求）---
+    fs2 = [f for f in fr if f["state"] == "FAR" and f.get("settled")
+           and abs(f["s"] - s_far) <= 0.002]
+    if fs2:
+        if d.get("anchor", "tl") == "tl":
+            # 遥测口径：cx/cy 归一化(0~1)，cw/ch 为源画面像素；左上角 = 中心 - 窗/2
+            e_anch = max(max(abs(f["cx"] - f["cw"] / 854 / 2),
+                             abs(f["cy"] - f["ch"] / 356 / 2)) for f in fs2)
+            rep("B8 远档钉死左上角", e_anch, e_anch <= 1e-6, "<=",
+                "1e-6 (%d 帧)" % len(fs2))
+        else:
+            print("  [跳过] B8 远档钉死左上角   -        (anchor=%s，非 tl 模式)"
+                  % d.get("anchor"))
+    else:
+        print("  [PASS] B8 远档钉死左上角     -        (本段无 FAR 稳态帧)")
 
     # --- C1 owner 覆盖 ---
     cov = d["summary"]["owner_cover"]

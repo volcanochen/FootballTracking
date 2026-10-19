@@ -33,6 +33,7 @@ review_sheet*.jpg
 # RF-DETR 推理输出（帧图 + 视频 + 评测 json）
 rf_out/
 rf_out40/
+rf_out45/
 # 人物检测缓存：person_dets.py 可重建
 dets_person_cache_*.npy
 

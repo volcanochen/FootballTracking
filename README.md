@@ -290,3 +290,30 @@ $PY eval_two_shot.py 2,3,6,10         # AI 判定 13 项
 - `vcnc-football`：本实验分支，产物 VCNC-Football.apk（未发布）
 - 端侧 UI：左下角控制条（播放/暂停 + 0.5/0.25/0.125 慢动作）、左滑亮度/右滑音量、单击暂停、本场播完停住
 - 构建链：免 Gradle 离线 aapt2 → javac → d8 → zipalign → apksigner（android/build_apk.sh）
+
+## 10. 视频编码：让 review.html 在浏览器里能直接播
+
+**症状**：页面里视频黑屏，提示「该视频编码格式浏览器不支持在线预览，请下载后用本地播放器查看」。
+
+**原因**：`cv2.VideoWriter(..., fourcc("mp4v"))` 写的是 **MPEG-4 Part 2**，Chrome/Edge/Safari 内核不解码它
+（而且 moov 索引在文件尾，边下边播也起不来）。Windows 上的 OpenCV 通常没有 openh264，写 `avc1` 会失败并静默退回 mp4v。
+
+**做法**：
+
+```bash
+$PY web_mp4.py rf_out45                # 目录内原地转成 H.264，原件备份到 .mp4v_backup/
+$PY web_mp4.py rf_out45 --dry-run      # 先看哪些需要转
+$PY web_mp4.py rf_out45 --crf 20       # 想要更清晰（默认 23，实测约 40 dB PSNR）
+```
+
+新出的视频直接用 `webvideo.WebWriter`（PyAV + libx264 + yuv420p + faststart，接口兼容 cv2.VideoWriter）：
+
+```python
+from webvideo import open_writer
+vw = open_writer(out_path, fps, (W, H))   # 没有 PyAV 时自动退回 cv2 并告警
+vw.write(bgr); vw.release()
+```
+
+`rf_traj_demo.py` 已改用它。其它仍写 `mp4v` 的脚本（anno_*、auto_director、demo_person_* 等）
+可以照同样方式替换，或跑完用 `web_mp4.py` 批量转一遍。
+
